@@ -1,0 +1,201 @@
+---
+title: "PML"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r init ,message=FALSE}
+library("readr")
+library("data.table")
+library("caret")
+library("doParallel")
+library("rpart.plot")
+library("reshape2")
+library("ggplot2")
+```
+
+This project consists on predicting how well people use exercize devices like "Fitbit" or so. We will use a large file of measurement data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants.They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. In the file, class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes
+
+
+Looking briefly at the file structure, there are lines with raw data for the measures and lines which include some statistical measures for each window as indicated in the paper of the study. For the measurement lines, the statistical values are NA.  
+If we look at the structure of the test file, we do not have statistics lines for the windows, but only the raw data lines.  
+To be usable, the model we will build should therefore only use raw data for forecasting. Consequently, we choose to keep only the raw data variables in the training file and we eliminate the statistics columns. We also remove the first 7 columns which are names / times specific to the generation of the file, and will not be used for a model.  
+
+
+## Loading the data
+
+```{r file, message=FALSE}
+
+pml_data <- fread("pml-training.csv",header = TRUE)
+dropcols  <- names(pml_data)[grepl( "kurtosis" , names(pml_data)) | grepl( "skewness" , names(pml_data)) | grepl( "max" , names(pml_data)) | grepl( "min" , names(pml_data)) | grepl( "var" , names(pml_data)) | grepl( "amplitude" , names(pml_data)) | grepl( "avg" , names(pml_data)) | grepl( "std" , names(pml_data))]
+set(pml_data, ,dropcols, NULL) # Dropping the statisics columns
+
+pml_data[,"classe"] <- factor(pml_data$classe)
+pml_data  <- pml_data[,-c(1,2,3,4,5,6,7)] # Dropping the first 7 columns
+
+pml_data[!complete.cases(pml_data),] # Controling that there are no remainin "NA"s
+
+addTaskCallback(function(...) {set.seed(1138);TRUE})  # Set seed for reproductibility, for each function calls
+inTraining <- createDataPartition(pml_data$classe, p = .8, list=FALSE) # Splitting the file in 2: 80% for training, 20% for testing.
+training <- pml_data[inTraining, ]
+testing <- pml_data[-inTraining, ]
+
+x <- training[,-53]  # Split to x,y for futher use, because in Caret, formula is slower 
+y <- training$classe
+
+```
+53 variables are obtained for a total of 19622 observations.
+
+
+__Loading of the final test file__
+```{r filetest, message=FALSE}
+pml_test <- fread("pml-testing.csv",header = TRUE)
+set(pml_test, ,dropcols, NULL)
+
+pml_test  <- pml_test[,-c(1,2,3,4,5,6,7)]
+```
+
+__An eye on variables__
+```{r filegraph, message=FALSE,warning=FALSE,fig.width = 12, fig.height = 12}
+melt.pml_data <- melt(pml_data)
+ggplot(data = melt.pml_data, aes(x = value,fill = classe)) + 
+        stat_density(alpha=.4) + 
+        facet_wrap(~variable, scales = "free",ncol=5)
+
+```
+Some variables seems skewed and not scaled well comparing to others (gyros). It should not be a problem because we are going to use classification tree modelling.
+
+## CART modelling
+
+We will fist try a CART modelling (single classification tree) using rpart.
+We use classical parameters : 
+Pruning of the tree is controlled by the complexity parameter (cp), which imposes a penalty to the tree for having two many splits. The default value is 0.01. The higher the cp, the smaller the tree. We use cross-validation approaches to determine the corresponding prediction accuracy of the model. Here a classical value of 10-fold cross validation is repeated 3 times. The tuneLength parameter is used to determine the total number of combinations that will be evaluated for the CP parameter.  
+
+The plotting of the resulting tree will give us an idea of the rules taken by the model.
+
+```{r modelRpart, ,fig.width = 12, fig.height = 12}
+
+trctrl <- trainControl(method = "repeatedcv", number = 10, repeats = 3)
+model<- train(classe ~., training, method = "rpart",
+                    parms = list(split = "gini"),
+                    trControl=trctrl,
+                    tuneLength = 6)
+
+rpart.plot(model$finalModel, type = 3, clip.right.labs = FALSE, branch = .3, under = TRUE)
+model
+varImp(model)
+pred <-predict(model,newdata=testing)
+print(confusionMatrix(data=pred,reference=testing$classe))
+
+```
+
+Acurracy is quite low even with optimum cp value. We will not go further on tuning this model. The random forests are generally more efficient.
+
+## Random Forests modelling
+
+As it is written in LG's web site "Improving Performance of Random Forest in caret::train()", train function in its default uses bootstrap sampling (25 times): the bootstrapping resampling method causes a significant increase in processing time. Comparing to the cross-validation resampling method, the bootstrapping resampling method had no positive impact on model accuracy. 
+We will then use a 5-fold cross-validation parameter.
+
+```{r modelrf0}
+
+# Define a function to give the OOB as it is not a model property in Caret.
+OOBErr <- function (x)
+{
+  cm <- x$confusion
+  cm <- cm[, -ncol(cm)]
+  (1 - sum(diag(cm)) / sum(cm)) * 100
+}
+
+
+t1=proc.time() # Record time for measurement
+
+
+fitControl <- trainControl(method = "cv",
+                           number = 5,
+                           allowParallel = TRUE)
+
+cls = makeCluster(detectCores() - 1)  # initialise parallel computations
+
+registerDoParallel(cls)
+getDoParWorkers()
+
+fit <- train(x,y, method="rf",trControl = fitControl)
+stopCluster(cls)
+registerDoSEQ()
+
+t2=proc.time()
+(t2-t1)/60
+
+fit
+OOBErr(fit$finalModel)
+pred <-predict(fit,newdata=testing)
+confusionMatrix(data=pred,reference=testing$classe)
+
+```
+OOB error is quite low, related to high accuracy.
+
+"mtry"" is the number of variables available for splitting at each tree node. For RF classification models, the default is the square root of the number of predictor variables (rounded down), so 7 in our case. The default three random selection of mtry seems quite not beeing optimal: we are going to make some tuning to have even a better accuracy for the model.
+
+```{r modelrf1}
+
+t1=proc.time() # Record time for measurement
+
+tunegrid <- expand.grid(.mtry=c(4:18)) # try several values for mtry 
+
+cls = makeCluster(detectCores() - 1)  # initialise parallel computations
+registerDoParallel(cls)
+fit <- train(x,y, method="rf",trControl = fitControl,tuneGrid=tunegrid)
+stopCluster(cls)
+registerDoSEQ()
+
+t2=proc.time()
+(t2-t1)/60
+
+fit
+OOBErr(fit$finalModel)
+plot(fit$finalModel)
+pred <-predict(fit,newdata=testing)
+confusionMatrix(data=pred,reference=testing$classe)
+
+mt <- fit$bestTune$mtry
+print(mt)
+
+```
+OOB error is less than previously with this optimized model.
+Regarding the error plot for OOB, we can try to use less trees to save time but keep good accuracy
+
+```{r modelrf2}
+
+t1=proc.time() # Record time for measurement
+
+cls = makeCluster(detectCores() - 1)  # initialise parallel computations
+registerDoParallel(cls)
+fit <- train(x,y, method="rf",trControl = fitControl,tuneGrid=data.frame(mtry=mt),ntree=300)
+stopCluster(cls)
+registerDoSEQ()
+
+t2=proc.time()
+(t2-t1)/60
+
+OOBErr(fit$finalModel)
+
+pred <-predict(fit,newdata=testing)
+confusionMatrix(data=pred,reference=testing$classe)
+
+varImp(fit)
+```
+
+Although OOB error is a little higher, There is no improvement neither deterioration in accuracy, but we saved time.
+
+Predictions on the test set:
+```{r modelrf3}
+
+pred <-predict(fit,newdata=pml_test)
+print(pred)
+
+```
+
