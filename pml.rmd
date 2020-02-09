@@ -1,5 +1,5 @@
 ---
-title: "PML"
+title: "PML- Prediction Assignment Writeup"
 output: html_document
 ---
 
@@ -28,7 +28,7 @@ To be usable, the model we will build should therefore only use raw data for for
 
 ## Loading the data
 
-```{r file, message=FALSE}
+```{r file, message=FALSE, results="hide"}
 
 pml_data <- fread("pml-training.csv",header = TRUE)
 dropcols  <- names(pml_data)[grepl( "kurtosis" , names(pml_data)) | grepl( "skewness" , names(pml_data)) | grepl( "max" , names(pml_data)) | grepl( "min" , names(pml_data)) | grepl( "var" , names(pml_data)) | grepl( "amplitude" , names(pml_data)) | grepl( "avg" , names(pml_data)) | grepl( "std" , names(pml_data))]
@@ -37,8 +37,6 @@ set(pml_data, ,dropcols, NULL) # Dropping the statisics columns
 pml_data[,"classe"] <- factor(pml_data$classe)
 pml_data  <- pml_data[,-c(1,2,3,4,5,6,7)] # Dropping the first 7 columns
 
-pml_data[!complete.cases(pml_data),] # Controling that there are no remainin "NA"s
-
 addTaskCallback(function(...) {set.seed(1138);TRUE})  # Set seed for reproductibility, for each function calls
 inTraining <- createDataPartition(pml_data$classe, p = .8, list=FALSE) # Splitting the file in 2: 80% for training, 20% for testing.
 training <- pml_data[inTraining, ]
@@ -46,6 +44,11 @@ testing <- pml_data[-inTraining, ]
 
 x <- training[,-53]  # Split to x,y for futher use, because in Caret, formula is slower 
 y <- training$classe
+
+```
+
+```{r file2, message=FALSE}
+pml_data[!complete.cases(pml_data),] # Controling that there are no remainin "NA"s
 
 ```
 53 variables are obtained for a total of 19622 observations.
@@ -100,6 +103,7 @@ Acurracy is quite low even with optimum cp value. We will not go further on tuni
 As it is written in LG's web site "Improving Performance of Random Forest in caret::train()", train function in its default uses bootstrap sampling (25 times): the bootstrapping resampling method causes a significant increase in processing time. Comparing to the cross-validation resampling method, the bootstrapping resampling method had no positive impact on model accuracy. 
 We will then use a 5-fold cross-validation parameter.
 
+__First model (default)__
 ```{r modelrf0}
 
 # Define a function to give the OOB as it is not a model property in Caret.
@@ -140,6 +144,7 @@ OOB error is quite low, related to high accuracy.
 
 "mtry"" is the number of variables available for splitting at each tree node. For RF classification models, the default is the square root of the number of predictor variables (rounded down), so 7 in our case. The default three random selection of mtry seems quite not beeing optimal: we are going to make some tuning to have even a better accuracy for the model.
 
+__Second model (tuning for mtry)__
 ```{r modelrf1}
 
 t1=proc.time() # Record time for measurement
@@ -168,6 +173,7 @@ print(mt)
 OOB error is less than previously with this optimized model.
 Regarding the error plot for OOB, we can try to use less trees to save time but keep good accuracy
 
+__Third model (optimized model)__
 ```{r modelrf2}
 
 t1=proc.time() # Record time for measurement
@@ -188,8 +194,8 @@ confusionMatrix(data=pred,reference=testing$classe)
 
 varImp(fit)
 ```
-
 Although OOB error is a little higher, There is no improvement neither deterioration in accuracy, but we saved time.
+Important variables gives us an idea of what counts for the model (almost same for the CART modelling at the beginning)
 
 Predictions on the test set:
 ```{r modelrf3}
